@@ -1,0 +1,38 @@
+syntax = "proto2";
+
+package cti.common;
+
+message AgentScheduleMessage
+{
+  enum AgentStatus
+  {
+    STOP = 0;
+    MOVE = 1;
+  }
+
+  enum NavigationState
+  {
+    STOPPED = 0;
+    MOVING = 1;
+    LIFTING = 2;
+    DOCKING = 3;
+    UNSTOPABLE = 4;
+    WAITING = 5;
+    PAUSE = 6;
+    OCCUPY_LIFT = 7;
+    ERROR = 8;
+    DOCKING_BLOCKED = 9;
+    CHARGING = 10;
+  }
+
+  optional int32 agent_id = 1;
+
+  repeated sint32 agent_position = 2 [packed=true];
+  optional AgentStatus agent_decision = 3 [default = MOVE];
+  repeated sint32 current_floor = 4 [packed=true];
+  optional NavigationState agent_navigation_state = 5 [default = STOPPED];
+  repeated sint32 agent_path = 6 [packed=true];
+  optional bool stop_moving = 7 [default = true];
+  optional string elevator_id = 8;
+  optional string target_floor = 9;
+}

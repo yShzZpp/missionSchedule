@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="mission_schedule" type="mission_schedule_node" name="mission_schedule" respawn="true"/>
+</launch>

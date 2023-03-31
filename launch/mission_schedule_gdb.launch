@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="mission_schedule" launch-prefix="gdb -ex run --args" type="mission_schedule_node" name="mission_schedule" output="screen" />
+</launch>

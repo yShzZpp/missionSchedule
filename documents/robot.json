@@ -1,0 +1,69 @@
+{
+  "robotsNote" : "robots in the same building",
+  "robots" :
+    [
+      {
+        "robotId" : "4eadffa25-d423272721-xxxxxxx",
+        "currentFloor" : "1",
+        "targetFloor" : "2B",
+        "powerPercentage" : 80,
+        "chassisState" : "ENABLED",
+        "robotState" : "Idle",
+        "currentLocation" : [1.2, 2.1, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "destination" : [2.2, 2.1, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "lastUpdateTime" : 175627118222
+      },
+
+      {
+        "robotId" : "xxxxxxxx",
+        "currentFloor" : "xxxx",
+        "targetFloor" : "xxxx",
+        "powerPercentage" : 80,
+        "chassisState" : "ENABLED",
+        "robotState" : "navigationState",
+        "currentLocation" : [ "positionX", "positionY", "angle", "orientationX",  "orientationY", "orientationZ", "orientationW"],
+        "destination" : [ "positionX", "positionY", "angle", "orientationX",  "orientationY", "orientationZ", "orientationW"],
+        "lastUpdateTime" : "xxxxxxx"
+      },
+      {
+        "robotId" : "xxxxxxxx",
+        "targetFloor" : "xxxx",
+        "currentFloor" : "xxxx",
+        "powerPercentage" : 45,
+        "robotState" : "navigationState",
+        "chassisState" : "DISABLED",
+        "currentLocation" : [ "positionX", "positionY", "angle", "orientationX",  "orientationY", "orientationZ", "orientationW"],
+        "destination" : [ "positionX", "positionY", "angle", "orientationX",  "orientationY", "orientationZ", "orientationW"],
+        "lastUpdateTime" : "xxxxxxx"
+      }
+    ],
+
+  "hivesNote" : "hives in the same building",
+  "hives" :
+    [
+      {
+        "hinveId" : "4eadffa25-d423272721-xxxxxxx",
+        "currentFloor" : "1",
+        "isCharging" : true,
+        "targetDockStationId" : "4ead663322-d846723721-xxxxxxx",
+        "currentLocation" : [1.2, 2.1, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "lastUpdateTime" : 175627118222
+      },
+      {
+        "hinveId" : "xxxxx",
+        "currentFloor" : "xx",
+        "isCharging" : true,
+        "targetDockStationId" : "xxxxxxx",
+        "currentLocation" : [ "positionX", "positionY", "angle", "orientationX",  "orientationY", "orientationZ", "orientationW"],
+        "lastUpdateTime" : "xxxxxxx"
+      },
+      {
+        "hinveId" : "xxxxx",
+        "currentFloor" : "xx",
+        "isCharging" : false,
+        "targetDockStationId" : "xxxxxxx",
+        "currentLocation" : [ "positionX", "positionY", "angle", "orientationX",  "orientationY", "orientationZ", "orientationW"],
+        "lastUpdateTime" : "xxxxxxx"
+      }
+    ]
+}
