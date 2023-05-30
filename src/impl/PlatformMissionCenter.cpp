@@ -20,6 +20,10 @@ namespace cti
       {
         item->qr_ = json["qr"].get<std::string>();
       }
+      if (json.contains("hiveId") && json["hiveId"].is_string())
+      {
+        item->hiveId_ = json["hiveId"].get<std::string>();
+      }
       if (json.contains("hiveQr") && json["hiveQr"].is_string())
       {
         item->hiveQr_ = json["hiveQr"].get<std::string>();
@@ -47,6 +51,10 @@ namespace cti
       if (json.contains("contexts") && json["contexts"].is_array())
       {
         item->contexts_ = json["contexts"];
+      }
+      if (json.contains("ignoreCommandId") && json["ignoreCommandId"].is_string())
+      {
+        item->ignoreCommandId_ = json["ignoreCommandId"];
       }
       // if (json.contains("withBox") && json["withBox"].is_boolean())
       // {
@@ -205,6 +213,7 @@ namespace cti
       SPDLOG_INFO("HiveOrderSet : First id {}, Second id {}", first->id(), second->id());
       //-------
 
+      /*----------*/
       // Judge according to whether the robot occupies the destination
       bool firstDestinationDodge = false;
       auto firstDestinationId = first->targetStationId();
@@ -337,7 +346,9 @@ namespace cti
           }
         }
       }
+      /*----------*/
 
+      // Judge according order state
       if (first->orderState() == OrderState::WAITING)
       {
         return first;
@@ -356,6 +367,7 @@ namespace cti
       {
         return second;
       }
+      
       // Judge according to the priority
       if (first->orderPriority() > second->orderPriority())
       {
@@ -367,14 +379,23 @@ namespace cti
       }
 
       StationModel firstTarget, secondTarget;
-      // auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
-      // auto robotPtr = deviceUtility->getRobotInfo();    //this robot info
       if (deviceUtility->getWaypointInfo(first->targetStationId(), firstTarget) &&
           deviceUtility->getWaypointInfo(second->targetStationId(), secondTarget))
       {
-        // Judge according to the floor, creat time of order,
+        // Judge according to the floor, density of road, creat time of order,
         if (firstTarget.floor() == secondTarget.floor())
         {
+          // Judge according to the first density_info of road
+          if (first->getFrontValueOfDensity() > second->getFrontValueOfDensity())
+          {
+            return second;
+          }
+          else if (first->getFrontValueOfDensity() < second->getFrontValueOfDensity())
+          {
+            return first;
+          }
+          
+          // Judge according to creat time of order
           if (first->orderCreateSec() > second->orderCreateSec())
           {
             return second;
@@ -444,6 +465,83 @@ namespace cti
       lastUpdateSec_ = std::chrono::system_clock::now();
     }
 
+    road_control::density_srvResponse HiveOrderSet::callDensityServer(std::shared_ptr<cti::missionSchedule::RobotUtility> robot, Position orderDestination)
+    {
+      road_control::density_srv densitySrv;
+      std::string robotId = robot->robotId();
+      auto robotPosition = robot->location();
+
+      geometry_msgs::PoseStamped start;
+      geometry_msgs::PoseStamped goal;
+
+      start.header.frame_id = "map";
+      start.header.stamp = ros::Time::now();
+      start.pose.position.x = robotPosition.slam.position.x;
+      start.pose.position.y = robotPosition.slam.position.y;
+      start.pose.position.z = robotPosition.slam.position.z;
+      start.pose.orientation.w = robotPosition.slam.orientation.w;
+      start.pose.orientation.x = robotPosition.slam.orientation.x;
+      start.pose.orientation.y = robotPosition.slam.orientation.y;
+      start.pose.orientation.z = robotPosition.slam.orientation.z;
+
+      goal.header.frame_id = "map";
+      goal.header.stamp = ros::Time::now();
+      goal.pose.position.x = orderDestination.slam.position.x;
+      goal.pose.position.y = orderDestination.slam.position.y;
+      goal.pose.position.z = orderDestination.slam.position.z;
+      goal.pose.orientation.w = orderDestination.slam.orientation.w;
+      goal.pose.orientation.x = orderDestination.slam.orientation.x;
+      goal.pose.orientation.y = orderDestination.slam.orientation.y;
+      goal.pose.orientation.z = orderDestination.slam.orientation.z;
+
+      densitySrv.request.robot_id = robotId;
+      densitySrv.request.start = start;
+      densitySrv.request.goal = goal;
+      densitySrv.request.partial = partialDensity_;
+      densitySrv.request.length = densityRange_;
+
+      SPDLOG_INFO("HiveOrderSet[density]: {} Call service {}. partial: {}, length: {}, start({},{}), goal({},{})", robotId, "/road_control/density_info", 
+        partialDensity_, densityRange_, start.pose.position.x, start.pose.position.y, goal.pose.position.x, goal.pose.position.y);
+      ROS_INFO("HiveOrderSet[density] : %s Call service /road_control/density_info", densitySrv.request.robot_id.c_str());
+
+      if (densityInfoClient_.call(densitySrv))
+      {
+        ROS_INFO("HiveOrderSet[density]: %s[%d], %s", robotId.c_str(), densitySrv.response.moveable, densitySrv.response.data.c_str());
+        SPDLOG_INFO("HiveOrderSet[density]: {}[{}], {}", robotId, densitySrv.response.moveable, densitySrv.response.data);
+        return densitySrv.response;
+      }
+      else
+      {
+        SPDLOG_INFO("HiveOrderSet[density]: {} Failed to call service {}", robotId, "/road_control/density_info");
+        road_control::density_srvResponse res;
+        res.data = "";
+        res.moveable = true;
+        return res;
+      }
+    }
+    /*
+     rosservice call /road_control_density_info "robot_id: '263'
+partial: true 
+length: 8.0
+start:
+  header:
+    seq: 0
+    stamp: {secs: 0, nsecs: 0}
+    frame_id: ''
+  pose:
+    position: {x: 0.0, y: 0.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 0.0}
+goal:
+  header:
+    seq: 0
+    stamp: {secs: 0, nsecs: 0}
+    frame_id: ''
+  pose:
+    position: {x: 0.0, y: 0.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 0.0}" 
+
+    */
+
     nlohmann::json HiveOrderSet::computeBestDeliverOrderCommand()
     {
       std::unique_lock<std::shared_timed_mutex> lk(mutex_);
@@ -454,6 +552,8 @@ namespace cti
       std::shared_ptr<ScheduleOrder> bestOrder;
       for (auto orderIdIter = insertOrderTable_.begin(); orderIdIter != insertOrderTable_.end();)
       {
+        auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+        auto currentRobot = deviceUtility->getRobotInfo();
         if (deliverOrders_.find(*orderIdIter) == deliverOrders_.end())
         {
           insertOrderTable_.erase(orderIdIter++);
@@ -463,12 +563,36 @@ namespace cti
           if (!bestOrder)
           {
             bestOrder = deliverOrders_[*orderIdIter];
+
+            //call  deliverOrders_[*orderIdIter]
+            auto bestOrderId = bestOrder->targetStationId();
+            StationModel bestOrderDestinationWaypoint;
+            if(deviceUtility->getWaypointInfo(bestOrderId, bestOrderDestinationWaypoint))
+            {
+              auto position = bestOrderDestinationWaypoint.coordinate();
+              auto res = callDensityServer(currentRobot, position);
+              if (res.data != "")
+              {
+                bestOrder->setDensityInfo(res);
+              }
+            }
           }
           else
           {
-            auto betterOrder = pickBetterOrder(bestOrder, deliverOrders_[*orderIdIter]);
+            //call  deliverOrders_[*orderIdIter]
+            auto orderId = deliverOrders_[*orderIdIter]->targetStationId();
+            StationModel orderDestinationWaypoint;
+            if(deviceUtility->getWaypointInfo(orderId, orderDestinationWaypoint))
+            {
+              auto position = orderDestinationWaypoint.coordinate();
+              auto res = callDensityServer(currentRobot, position);
+              if (res.data != "")
+              {
+                deliverOrders_[*orderIdIter]->setDensityInfo(res);
+              }
+            }
 
-            auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+            auto betterOrder = pickBetterOrder(bestOrder, deliverOrders_[*orderIdIter]);
             StationModel betterDestinationWaypoint;
             auto betterDestinationId = betterOrder->targetStationId();
             if(! deviceUtility->getWaypointInfo(betterDestinationId, betterDestinationWaypoint)) {}
@@ -617,6 +741,26 @@ namespace cti
           orderLocalStoragePath_ = std::string(::getenv("HOME")) + "/.ros/" PROJECT_NAME + "/orderLocalStorage.json";
         }
 
+        void updatePlatformCommand(std::string oldCommandId, nlohmann::json command)
+        {
+          std::unique_lock<std::shared_timed_mutex> lk(mutex_);
+          SPDLOG_INFO("[density]updatePlatformCommand : oldCommandId: {}, new command: {}", oldCommandId, command.dump());
+          if (command.empty() || !command.contains("id"))
+          {
+            platformCommands_.clear();
+            return ;
+          }
+          std::string id = oldCommandId;
+          auto platformCommand = std::find_if(platformCommands_.begin(), platformCommands_.end(),
+            [oldCommandId](const std::shared_ptr<CommandVertex>& command)
+            {
+              return command->id() == oldCommandId;
+            });
+          // platformCommands_.clear();
+          platformCommands_.erase(platformCommand);
+          platformCommands_.push_back(CommandVertex::parseFromJson(command));
+        }
+
         void onPlatformTransitUpdate(const std_msgs::String& msg)
         {
           std::unique_lock<std::shared_timed_mutex> lk(mutex_);
@@ -652,6 +796,7 @@ namespace cti
           nlohmann::json command = nlohmann::json::parse(msg.data);
           std::string commandId = command.at("id").get<std::string>();
           SPDLOG_INFO("PlatformMission Center new command {}", msg.data);
+          SPDLOG_INFO("onPlatformCommand[density]: PlatformMission Center new command {}", msg.data);
           if (command.contains("requestedBy") && "39136da7-56a5-49ff-85b3-967803f4e1ee" == command.at("requestedBy").get<std::string>())
           {
             return ;
@@ -678,6 +823,13 @@ namespace cti
             deviceUtility->setStillMode(still, allowDirectCommand, duration);
             return ;
           }
+          if (command.contains("commandType") && command["commandType"] == "RESTART")
+          {
+            auto missionPlanner = cti::missionSchedule::common::getContainer()->resolveOrNull<IMissionPlanner>();
+            missionPlanner->robotAutonomicReboot();
+            return ;
+          }
+
           platformCommands_.push_back(CommandVertex::parseFromJson(command));
         }
 
@@ -1143,6 +1295,8 @@ namespace cti
             storePlatformOrdersToLocalStorage(nlohmann::json::object(), true);
             return false;
           }
+          SPDLOG_INFO("loadOrderLocalStorage[density]: orderSet_ init!");
+          ROS_INFO("loadOrderLocalStorage[density]: orderSet_ init!");
           orderSet_ = orderSet;
           return true;
         }
@@ -1375,6 +1529,8 @@ namespace cti
               {
                 if (orderSet->hiveId() == hiveId)
                 {
+                  SPDLOG_INFO("1 allocateHiveOrderToRobot[density]: orderSet_ init!");
+                  ROS_INFO("1 allocateHiveOrderToRobot[density]: orderSet_ init!");
                   orderSet_.reset();
                   orderSet_ = orderSet;
                   return true;
@@ -1721,6 +1877,8 @@ namespace cti
             {
               if (auto orderSet = parsePlatformOrders(hiveOrdersJson[chosenOrderIndex]))
               {
+                SPDLOG_INFO("2 allocateHiveOrderToRobot[density]: orderSet_ init!");
+                ROS_INFO("2 allocateHiveOrderToRobot[density]: orderSet_ init!");
                 orderSet_.reset();
                 orderSet_ = orderSet;
                 nlohmann::json orderSeclectReportJson = computeAllocationResult(hiveId, hiveOrdersJson, orderCostMap, hiveAllocationReason, orderAllocationReason);
@@ -1752,10 +1910,47 @@ namespace cti
           {
             for (auto& commandIter : platformCommands_)
             {
+              auto command = commandIter->data();
               if (commandIter->commandState() == CommandState::COMMAND_QUEUEING)
               {
-                return commandIter->data();
+                command["queueing"] = true;
+                if (!command.empty() && command.contains("coordinates") && orderSet_)
+                {
+                  Position coordinate{};
+                  coordinate.parseFromJson(command.at("coordinates"));
+                  auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+                  auto robotPtr = deviceUtility->getRobotInfo();
+                  auto res = orderSet_->callDensityServer(robotPtr, coordinate);
+                  if (res.data != "")
+                  {
+                    auto dataJson = nlohmann::json::parse(res.data);
+                    double densityValue = -1;
+                    if (dataJson.contains("partialDensity") && !dataJson["partialDensity"].empty() && dataJson["partialDensity"][0].contains("cost"))
+                    {
+                      densityValue = dataJson["partialDensity"][0]["cost"].get<double>();
+                    }
+                    else if(dataJson.contains("fullDensity") && !dataJson["fullDensity"].empty() && dataJson["fullDensity"][0].contains("cost"))
+                    {
+                      densityValue = dataJson["fullDensity"][0]["cost"].get<double>();
+                    }
+                    SPDLOG_INFO("computeCloudDirectCommand[density] : Add moveable({}) and value({}) of density in command.", res.moveable, densityValue);
+                    command["moveable"] = res.moveable ? true : false;
+                    command["densityValue"] = densityValue;
+                  }
+                }
+                else if (!orderSet_)
+                {
+                  SPDLOG_INFO("[density]computeCloudDirectCommand : Calling densityInfo not use orderSet_ because of orderSet_ empty");
+                  ROS_WARN("[density]computeCloudDirectCommand : Calling densityInfo not use orderSet_ because of orderSet_ empty");
+                }
+                // return commandIter->data();
+                return command;
               }
+              else 
+              {
+                command["queueing"] = false;
+                return command;
+              } 
             }
           }
           return nlohmann::json::object();
@@ -1767,7 +1962,13 @@ namespace cti
           allocateManualOrderToRobot();
           if (manualOrder_)
           {
-            return manualOrder_->computeOrderExecuteCommand();
+            auto command = manualOrder_->computeOrderExecuteCommand();
+            if (command.empty() || command.contains("useMock"))
+            {
+              return nlohmann::json::object();
+            }
+            return command;
+            // return manualOrder_->computeOrderExecuteCommand();
           }
           return nlohmann::json::object();
         }
@@ -1858,7 +2059,13 @@ namespace cti
 
         bool updatePlatformMissionState(const nlohmann::json& commandResult) override
         {
+          ROS_INFO("[density]updatePlatformMissionState : %s", commandResult.dump().c_str());
+          SPDLOG_INFO("[density]updatePlatformMissionState : {}", commandResult.dump());
           std::unique_lock<std::shared_timed_mutex> lk(mutex_);
+          if (commandResult.empty() || !commandResult.contains("id"))
+          {
+            return false;
+          }
           std::string id = commandResult.at("id").get<std::string>();
           auto platformCommand = std::find_if(platformCommands_.begin(), platformCommands_.end(),
             [id](const std::shared_ptr<CommandVertex>& command)
@@ -1870,6 +2077,7 @@ namespace cti
             std::string commandState = commandResult.at("commandState").get<std::string>();
             if ("COMPLETED" == commandState || "FAILED" == commandState || "CANCELLED" == commandState)
             {
+              SPDLOG_INFO("[density]updatePlatformMissionState : erase command id: {}", (*platformCommand)->id());
               (*platformCommand).reset();
               platformCommands_.erase(platformCommand);
             }

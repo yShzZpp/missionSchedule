@@ -14,6 +14,7 @@
 #include "common/ContainerInjector.h"
 
 #include "std_msgs/String.h"
+#include "std_msgs/UInt8.h"
 #include "mission_schedule/batteryMsg.h"
 #include "cti_msgs/ZoneArray.h"
 #include "cti_msgs/HealthState.h"
@@ -27,6 +28,7 @@
 #include "cti_msgs/BackgardenDownloadInfo.h"
 #include "cti_msgs/CtiCommonService.h"
 #include "schedule_message.pb.h"
+#include "IPathPlanner.h"
 #include "IMissionPlanner.h"
 #include "IPlatformMissionCenter.h"
 

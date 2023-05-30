@@ -50,8 +50,22 @@ namespace cti
         std::chrono::system_clock::time_point lastPlatformUpdateSec_;
         std::map<std::string, std::chrono::system_clock::time_point> orderFirstObserveTimeMap_;
 
+        bool partialDensity_ = true;
+        double densityRange_ = 10.0;
+        ros::ServiceClient densityInfoClient_;
+
       public:
-        HiveOrderSet(const std::string& id, const std::string& hiveId) : hiveOrderSetId_(id), hiveId_(hiveId) {}
+        HiveOrderSet(const std::string& id, const std::string& hiveId) : hiveOrderSetId_(id), hiveId_(hiveId) 
+        {
+          if (auto nodeHandle = cti::missionSchedule::common::getContainer()->resolveOrNull<ros::NodeHandle>())
+          {
+            densityInfoClient_ = nodeHandle->serviceClient<road_control::density_srv>("/road_control/density_info");
+            // nodeHandle->getParam("/partial_density", partialDensity_);
+            // nodeHandle->getParam("/density_range", densityRange_);
+            nodeHandle->param("/mission_schedule/partial_density", partialDensity_, true);
+            nodeHandle->param("/mission_schedule/density_range", densityRange_, 10.0);
+          }
+        }
         nlohmann::json toJson();
         inline const auto & hiveId() {return hiveId_; }
         inline auto & hiveTags() { return hiveTags_; }
@@ -69,7 +83,7 @@ namespace cti
         void addOrderFirstObserveTime(std::string order_id);
         void delOrderFirestObserveTime(std::string order_id);
         int getDurationOfCurrentTimeAndFirstObserveTime(std::string order_id);
-
+        road_control::density_srvResponse callDensityServer(std::shared_ptr<cti::missionSchedule::RobotUtility> robot, Position orderDestination);
     };
 
     std::shared_ptr<IPlatformMissionCenter> createPlatformMissionCenter();

@@ -36,10 +36,12 @@
 // 261 w%qJG9c5
 // 254 9Zu$HSfn
 // 255 jNBfG&tC
+// 258 8tFjVdZ*
 // 267 urUws@nm
 // 269 fzG$8zT&
+// 238 JbKG^!y5
 
-// catkin_make install --pkg mission_schedule local_schedule cloud_scheduling_node infrary_communication cti_record_log robot_base robot_docking
+// catkin_make install --pkg mission_schedule local_schedule cloud_scheduling_node infrary_communication cti_record_log robot_base robot_docking zigbee_module_v2 br_bringup system_monitor
 // ./make-deb ../../workspace/install/ br-robot-scheduling 8.12.15b TT
 
 // sudo vim /etc/NetworkManager/NetworkManager.conf
@@ -214,16 +216,31 @@ static const char* main_tree_xml_text = R"(
     <IfThenElse name="checkStillMode">
       <Fallback name="robotStatusCheck">
         <isStillMode/>
+        <isRobotFault/>
         <isZigbeeModuleFault/>
       </Fallback>
-      <Fallback name="robotStillBehavior">
-        <executeRobotStillBehavior/>
+      <Sequence name="robotStillBehavior">
+        <IfThenElse name="checkRobotReboot">
+          <isZigbeeModuleFault/>
+          <rebootZigbeeModule/>
+          <forceSuccess/>
+        </IfThenElse>
+        <IfThenElse name="checkRobotReboot">
+          <isRobotFault/>
+          <robotAutonomicReboot/>
+          <forceSuccess/>
+        </IfThenElse>
         <IfThenElse name="checkDirectCommand">
-          <isDirectedCommandAllowedInStillMode/>
+          <Sequence name="abortCommandCheck">
+            <isDirectedCommandAllowedInStillMode/>
+            <Inverter>
+              <Condition ID="isCloudDirectCommandEmpty"/>
+            </Inverter>
+          </Sequence>
           <executeCloudDirectCommand/>
           <executeRobotStillBehavior/>
         </IfThenElse>
-      </Fallback>
+      </Sequence>
       <SubTree ID="scheduleTree"/>
     </IfThenElse>
   </BehaviorTree>
@@ -291,7 +308,6 @@ int main(int argc, char** argv)
   SPDLOG_INFO(" ====> MISSION SCHEDULE NODE STARTUP @ v{}{}", MAIN_VERSION_INFO, PATCH_VERSION_INFO);
   SPDLOG_INFO("compiled time: {}, branch: {}, user: {}, email: {}", COMPILED_TIME, GIT_BRANCH, GIT_USER_NAME, GIT_USER_EMAIL);
 
-
   BT::BehaviorTreeFactory factory;
   cti::missionSchedule::registerNodes(factory);
   auto scheduleTree = factory.createTreeFromText(main_tree_xml_text);
@@ -308,13 +324,21 @@ int main(int argc, char** argv)
   }
 
   auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<cti::missionSchedule::IDeviceRuntimeUtility>();
+  if (relocateJson.contains("zigbeeFault"))
+  {
+    deviceUtility->setZigbeeFault(relocateJson["zigbeeFault"]);
+  }
   int waitingRelocateTime = 0;
   while (!isTerminated && ((!deviceUtility->getRobotInfo()) || (!deviceUtility->getRobotInfo()->localizedSet()) || !deviceUtility->getRobotInfo()->localized()))
   {
     SPDLOG_INFO("MissionSchedule wait for starting!");
     std::this_thread::sleep_for(5s);
     waitingRelocateTime += 5;
-    if (!relocateJson.empty() && waitingRelocateTime >= 20)
+
+    if (relocateJson.contains("commandType") &&
+        relocateJson.at("commandType").is_string() &&
+        relocateJson.at("commandType").get<std::string>() == "RELOCATE" &&
+        waitingRelocateTime >= 20)
     {
       missionPlanner->publishRelocateCommand(relocateJson);
       waitingRelocateTime = 0;

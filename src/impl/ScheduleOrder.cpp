@@ -404,12 +404,45 @@ namespace cti
       return true;
     }
 
-
     bool ScheduleOrder::setAuthenticDeliver(bool authentic)
     {
       std::unique_lock<std::shared_timed_mutex> lk(mutex_);
       authenticDeliver_ = authentic;
       return true;
+    }
+
+    void ScheduleOrder::setDensityInfo(const road_control::density_srvResponse density)
+    {
+      std::unique_lock<std::shared_timed_mutex> lk(mutex_);
+      auto dataJson = nlohmann::json::parse(density.data);
+      auto moveable = density.moveable;
+      double densityValue = -1;
+      
+      // if (dataJson.contains("partialDensity"))
+      // {
+      //   densityValue = dataJson["partialDensity"][0]["density"].get<double>();
+      // }
+      // Use full density
+      if(dataJson.contains("fullDensity") && !dataJson["fullDensity"].empty() && dataJson["fullDensity"][0].contains("cost"))
+      {
+        densityValue = dataJson["fullDensity"][0]["cost"].get<double>();
+      }
+      SPDLOG_INFO("setDensityInfo[density]: moveable: {}, densityValue: {}", moveable, densityValue);
+      densityInfo_ = std::make_tuple(moveable, densityValue);
+      double timesOfDensityValue = getFrontTimesOfDensity();
+      if (timesOfDensityValue < 5)
+      {
+        timesOfDensityValue ++;
+        setFirstDensityInfo(moveable, densityValue, timesOfDensityValue);
+      }
+    }
+
+    void ScheduleOrder::setFirstDensityInfo(const bool moveable, const double value, const int times)
+    {
+      // std::unique_lock<std::shared_timed_mutex> lk(mutex_);
+      double lastDensityValue = getFrontValueOfDensity();
+      double maxValue = lastDensityValue >= value ? lastDensityValue : value;
+      frontDensityInfo_ = std::make_tuple(moveable, maxValue, times);
     }
 
     nlohmann::json ScheduleOrder::toJson()
@@ -573,6 +606,16 @@ namespace cti
       if (command->orderState().empty() || command->orderId().empty() || command->orderId() != id_)
       {
         return;
+      }
+      if (!command->id().empty() && command->id() == ignoreCommandIds_)
+      {
+        SPDLOG_INFO("ScheduleOrder ignore {} id command", command->id());
+        return;
+      }
+      if (!command->ignoreCommandId().empty())
+      {
+        ignoreCommandIds_ = command->ignoreCommandId();
+        SPDLOG_INFO("ScheduleOrder update ignore {} command id", ignoreCommandIds_);
       }
       // if (command->stationId() != targetStationId_ && HIVE_STERILIZATION == orderType_ && orderState_ == OrderState::DROPPING_OFF)
       // {
@@ -773,7 +816,7 @@ namespace cti
             && deviceUtility->isDeviceStatusOk())
         {
           auto missionPlanner = cti::missionSchedule::common::getContainer()->resolveOrNull<IMissionPlanner>();
-          missionPlanner->publishAbortCommand(id_);
+          missionPlanner->publishAbortCommand(id_, false);
         }
       }
       if (isOrderStateOnFinished(orderState_) && orderType_ == OrderType::HIVE_STERILIZATION)
@@ -1067,6 +1110,11 @@ namespace cti
       if ("DROP_OFF" == progressInfo->commandType() && CommandState::COMMAND_COMPLETED == progressInfo->commandState()
           && progressInfo->stationId() == targetStationId_)
       {
+        auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+        if (!progressInfo->hiveId().empty() && !progressInfo->stationId().empty())
+        {
+          deviceUtility->setHiveOccupyStation(progressInfo->hiveId(), progressInfo->stationId());
+        }
         orderState_ = OrderState::COMPLETED;
       }
       else if ("CHARGE" == progressInfo->commandType() && CommandState::COMMAND_COMPLETED == progressInfo->commandState()
@@ -1096,7 +1144,7 @@ namespace cti
       auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
       auto robotInfo = deviceUtility->getRobotInfo();
       bool destinationDodge = false;
-      returnWaypointId = targetStationId_;
+      // returnWaypointId = targetStationId_;
       for (auto fallbackWaypointId : fallbackWaypointId_)
       {
         StationModel fallbackWaypoint;
@@ -1138,7 +1186,7 @@ namespace cti
       }
       if (!destinationDodge)
       {
-        return returnWaypointId;
+        return targetStationId_;
       }
       // Destination dodge and fallback waypoint is not empty, returnWaypoint is fallbackWaypoint.
       for (auto fallbackWaypoint : fallbackWaypoints)
@@ -1182,6 +1230,13 @@ namespace cti
       std::unique_lock<std::shared_timed_mutex> lk(mutex_);
       auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
       hivePicked_ = deviceUtility->isHiveAttachedOnRobot();
+
+      nlohmann::json commandMock = nlohmann::json::object();
+      commandMock["useMock"] = true;
+      bool moveable = getMoveableFromDensity();
+      double densityVal = getValueOfDensity();
+      SPDLOG_INFO("ScheduleOrder[density] : Adding moveable({}) and value({}) of density in command.", moveable, densityVal);
+
       if (orderState_ == OrderState::PENDING)
       {
         if ((!hivePicked_ || (hivePicked_ && hiveId_ != deviceUtility->getRobotInfo()->hiveAttachedOnRobot()))
@@ -1234,7 +1289,9 @@ namespace cti
           {
             if (orderState_ == OrderState::DROPPING_OFF)
             {
-              if (calculateBestTargetStationId() != targetStationId_)
+              std::string bestTargetStationId = calculateBestTargetStationId();
+              SPDLOG_INFO("ScheduleOrder bestTargetStationId {}", bestTargetStationId);
+              if (bestTargetStationId != targetStationId_ && orderScheduleType_ == "PLATFORM")
               {
                 nlohmann::json command = computeCommandHandler_[orderState_]();
                 if (!orderTags_.empty() && !command.empty())
@@ -1245,10 +1302,24 @@ namespace cti
                     command["orderTags"].push_back(*tagIter);
                   }
                 }
+                //add moveable and value of density in command
+                if (! (densityVal < 0.0))
+                {
+                  command["moveable"] = moveable;
+                  command["densityValue"] = densityVal;
+                  SPDLOG_INFO("1 ScheduleOrder[density] : Added moveable({}) and value({}) of density in command.", moveable, densityVal);
+                }
                 return command;
               }
             }
-            return nlohmann::json::object();
+            if (! (densityVal < 0.0))
+            {
+              commandMock["moveable"] = moveable;
+              commandMock["densityValue"] = densityVal;
+              SPDLOG_INFO("2 ScheduleOrder[density] : Added moveable({}) and value({}) of density in command.", moveable, densityVal);
+            }
+            return commandMock;
+            // return nlohmann::json::object();
           }
         }
       }
@@ -1261,6 +1332,13 @@ namespace cti
         {
           command["orderTags"].push_back(*tagIter);
         }
+      }
+      //add moveable and value of density in command
+      if (! (densityVal < 0.0))
+      {
+        command["moveable"] = moveable;
+        command["densityValue"] = densityVal;
+        SPDLOG_INFO("3 ScheduleOrder[density] : Added moveable({}) and value({}) of density in command.", moveable, densityVal);
       }
       return command;
     }
@@ -1489,9 +1567,22 @@ namespace cti
       }
       else
       {
+        StationModel targetStation;
         std::string oldWaypointId, newWaypointId;
         oldWaypointId = targetStationId_;
         newWaypointId  = calculateBestTargetStationId();
+        SPDLOG_INFO("ScheduleOrder bestTargetStationId {}", newWaypointId);
+        auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+        deviceUtility->getWaypointInfo(targetStationId_, targetStation);
+        auto robotInfo = deviceUtility->getRobotInfo();
+        if (newWaypointId.empty())
+        {
+          newWaypointId = targetStationId_;
+          if (robotInfo->currentFloor() == targetStation.floor())
+          {
+            command["shouldDodge"] = true;
+          }
+        }
         SPDLOG_INFO("ScheduleOrder compute oldWaypointId: {}, newWaypointId: {}", oldWaypointId, newWaypointId);
         if (oldWaypointId != newWaypointId)
         {
@@ -1516,9 +1607,9 @@ namespace cti
         command["hiveOrderSetId"] = hiveOrderSetId_;
       }
       command["scheduleType"] = orderScheduleType_;
+
       auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
       auto robotInfo = deviceUtility->getRobotInfo();
-
       if (orderScheduleType_ != "PLATFORM" && robotInfo->robotState() == RobotState::CHARGING && hivePicked_)
       {
         command["dropInPlace"] = true;

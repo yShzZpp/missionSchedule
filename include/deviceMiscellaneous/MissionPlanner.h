@@ -14,6 +14,7 @@
 
 #include "ros/ros.h"
 #include "std_msgs/String.h"
+#include "std_msgs/Bool.h"
 #include "common/Hungarian.h"
 #include "common/ScheduleOrder.h"
 #include "mission_schedule/coordinatesMsg.h"

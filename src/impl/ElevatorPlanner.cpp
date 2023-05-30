@@ -173,10 +173,6 @@ namespace cti
             {
               return false;
             }
-            if (RobotState::LIFTING != robot->robotState() && (!(robot->currentFloor() == currentFloor && RobotState::BUSY == robot->robotState())))
-            {
-              return false;
-            }
 
             std::string elevatorId = robot->currentElevatorId();
             if (elevatorId.empty() && !robot->currentElevatorDeviceId().empty() &&
@@ -254,7 +250,8 @@ namespace cti
                                                const std::string& currentFloor,
                                                const StationModel& targetStation,
                                                bool usePathCost,
-                                               const std::vector<std::string>& tags) override
+                                               const std::vector<std::string>& tags,
+                                               const std::string& preferElevatorId) override
         {
           std::unique_lock<std::shared_timed_mutex> lk(mutex_);
           ElevatorPlan plan;
@@ -292,6 +289,10 @@ namespace cti
 
               waitTime = waitTime / 10.0;
               std::string otherVertexElevatorId = originalElevatorGraph_[otherVertex].elevatorId;
+              if (!preferElevatorId.empty() && otherVertexElevatorId != preferElevatorId)
+              {
+                waitTime += 10.0;
+              }
               boost::add_edge(startVertex, otherVertex, {waitTime, {otherVertexElevatorId}}, updatedElevatorGraph);
             }
           }
@@ -461,12 +462,14 @@ namespace cti
               originalElevatorGraph_[currentVertex].elevatorEnterPosition = originalElevatorGraph_[currentVertex].elevatorPosition;
               originalElevatorGraph_[currentVertex].elevatorEnterPosition.shift(waypoint.waitPoseOffsetV, 0.0, 0.0);
             }
+            originalElevatorGraph_[currentVertex].elevatorPolygon = computePolygonArea(originalElevatorGraph_[currentVertex].elevatorEnterPosition, 0.9f, 0.55f);
             if (floorVertices_.find(waypoint.floor) != floorVertices_.end())
             {
-              double waitTime = 60.0;
+              double waitTime = 300.0;
               for (auto otherVertex : floorVertices_[waypoint.floor])
               {
-                boost::add_edge(currentVertex, otherVertex, {waitTime}, originalElevatorGraph_);
+                std::string otherVertexElevatorId = originalElevatorGraph_[otherVertex].elevatorId;
+                boost::add_edge(currentVertex, otherVertex, {waitTime, {elevator.id, otherVertexElevatorId}}, originalElevatorGraph_);
               }
             }
             floorVertices_[waypoint.floor].emplace_back(currentVertex);
@@ -486,7 +489,7 @@ namespace cti
           {
             waitTime = std::abs(originalElevatorGraph_[*it].floorNumber - originalElevatorGraph_[*(it + 1)].floorNumber);
             waitTime += 1 / waitTime;
-            boost::add_edge(*it, *(it + 1), {waitTime}, originalElevatorGraph_);
+            boost::add_edge(*it, *(it + 1), {waitTime, {elevator.id}}, originalElevatorGraph_);
           }
         }
     };

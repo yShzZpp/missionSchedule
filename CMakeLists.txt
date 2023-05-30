@@ -47,6 +47,7 @@ find_package (catkin REQUIRED COMPONENTS
   behaviortree_cpp_v3
   save_crash_log
   message_generation
+  road_control
 )
 
 file(GLOB_RECURSE project_cxx_sources "${PROJECT_SOURCE_DIR}/src/*.cpp")

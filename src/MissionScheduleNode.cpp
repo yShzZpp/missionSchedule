@@ -21,6 +21,13 @@ namespace cti
       return deviceUtility->isStillMode() ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
     }
 
+    BT::NodeStatus isRobotFault()
+    {
+      auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+      SPDLOG_INFO("MissionSchedule tree hit {}", __func__);
+      return deviceUtility->isRobotFault() ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+    }
+
     BT::NodeStatus isZigbeeModuleFault()
     {
       auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
@@ -166,6 +173,13 @@ namespace cti
       auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
       SPDLOG_INFO("MissionSchedule tree hit {}", __func__);
       return deviceUtility->isDevicePowerNice() ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+    }
+
+    BT::NodeStatus rebootZigbeeModule()
+    {
+      auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+      SPDLOG_INFO("MissionSchedule tree hit {}", __func__);
+      return deviceUtility->rebootZigbeeModule() ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
     }
 
     BT::NodeStatus isCurrentParkingLocationGood()
@@ -342,13 +356,13 @@ namespace cti
       return platformMissionCenter->cancelHiveSterilize() ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
     }
 
-
     void registerNodes(BT::BehaviorTreeFactory& factory)
     {
       factory.registerSimpleCondition("isPlatformMissionRunning", std::bind(isPlatformMissionRunning));
       factory.registerSimpleCondition("loadOrderLocalStorage", std::bind(loadOrderLocalStorage));
       factory.registerSimpleCondition("isHiveLoaded", std::bind(isHiveLoaded));
       factory.registerSimpleCondition("isStillMode", std::bind(isStillMode));
+      factory.registerSimpleCondition("isRobotFault", std::bind(isRobotFault));
       factory.registerSimpleCondition("isZigbeeModuleFault", std::bind(isZigbeeModuleFault));
       factory.registerSimpleCondition("isManualMode", std::bind(isManualMode));
       factory.registerSimpleCondition("isCloudDirectCommandEmpty", std::bind(isCloudDirectCommandEmpty));
@@ -372,6 +386,7 @@ namespace cti
 
       factory.registerSimpleAction("updateStationOccupyRelationship", std::bind(updateStationOccupyRelationship));
       factory.registerSimpleAction("executeRobotStillBehavior", std::bind(executeRobotStillBehavior));
+      factory.registerSimpleAction("rebootZigbeeModule", std::bind(rebootZigbeeModule));
       factory.registerSimpleAction("allocateHiveOrderToRobot", std::bind(allocateHiveOrderToRobot));
       factory.registerSimpleAction("forceFailure", std::bind(forceFailure));
       factory.registerSimpleAction("forceSuccess", std::bind(forceSuccess));

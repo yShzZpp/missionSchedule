@@ -26,7 +26,8 @@ namespace cti
                                                        const std::string& currentFloor,
                                                        const StationModel& targetStation,
                                                        bool usePathCost = false,
-                                                       const std::vector<std::string>& tags = std::vector<std::string>()) = 0;
+                                                       const std::vector<std::string>& tags = std::vector<std::string>(),
+                                                       const std::string& preferElevatorId = std::string()) = 0;
     };
   }
 }

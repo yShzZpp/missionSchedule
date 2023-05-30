@@ -11,6 +11,7 @@
 #include <boost/graph/astar_search.hpp>
 #include <boost/graph/dijkstra_shortest_paths.hpp>
 #include <boost/graph/adjacency_list.hpp>
+#include <road_control/density_srv.h>
 
 namespace nlohmann {
     template<typename Clock, typename Duration>
@@ -379,7 +380,7 @@ namespace cti
         nlohmann::json contexts_;
         Position coordinate_{};
         CommandState commandState_{CommandState::COMMAND_QUEUEING};
-        std::string id_, qr_, hiveQr_, orderId_, hiveOrderSetId_, commandType_, scheduleType_, stationId_, orderState_, reason_;
+        std::string id_, qr_, hiveId_, hiveQr_, orderId_, hiveOrderSetId_, commandType_, scheduleType_, stationId_, orderState_, reason_, ignoreCommandId_;
       public:
         CommandVertex() = default;
 
@@ -389,7 +390,11 @@ namespace cti
 
         inline const auto& data() const { return data_; }
 
+        inline const auto& hiveId() const { return hiveId_; }
+
         inline const auto& hiveQr() const { return hiveQr_; }
+
+        inline const auto& ignoreCommandId() const { return ignoreCommandId_; }
 
         // inline const auto& withBox() const { return withBox_; }
 
@@ -436,6 +441,7 @@ namespace cti
           nlohmann::json jsonObjects;
           jsonObjects["id"] = id_;
           // jsonObjects["withBox"] = withBox_;
+          jsonObjects["hiveId"] = hiveId_;
           jsonObjects["waypointId"] = stationId_;
           jsonObjects["orderState"] = orderState_;
           jsonObjects["switchFloor"] = switchFloor_;

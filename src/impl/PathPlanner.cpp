@@ -129,7 +129,7 @@ namespace cti
         double calculatePathCost(const Position& start, const Position& goal, const std::string& floor) override
         {
           auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
-          auto currentBuilding = deviceUtility->getRobotInfo()->buildingName();
+          auto currentBuilding = deviceUtility->getCurrentBuilding();
           if (map_.find(currentBuilding + floor) == map_.end())
           {
             if (!loadNavMap(currentBuilding, floor))

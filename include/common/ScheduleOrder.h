@@ -9,6 +9,8 @@
 #include <boost/asio.hpp>
 #include <boost/asio/io_service.hpp>
 
+#include <road_control/density_srv.h>
+
 namespace cti
 {
   namespace missionSchedule
@@ -113,6 +115,7 @@ namespace cti
         bool shouldPickHive_{true}, sourceArrived_{false}, targetArrived_{false}, hivePicked_{false}, hiveDropped_{false}, paused_{false}, robotChargingContinue_{false}, authenticDeliver_{false}, designatedRobot_{false}, isSterilizeOrderReachedStation_{false};
 
         nlohmann::json orderContexts_;
+        std::string ignoreCommandIds_;
         std::vector<std::string> peekedQr_;
         std::vector<std::string> fallbackWaypointId_;
         std::vector<SterilizationStep> sterilizationSteps_;
@@ -123,12 +126,17 @@ namespace cti
         std::chrono::system_clock::time_point orderCreateSec_;
         std::chrono::system_clock::time_point pauseCommandExpireSec_;
         std::shared_ptr<boost::asio::deadline_timer> waitingPollTimer_, sterilizeWaitTimer_;
+        std::tuple<bool, double> densityInfo_{true, -1.0};
+        std::tuple<bool, double, int> frontDensityInfo_{true, -1.0, 0};
       public:
         ScheduleOrder();
+
         bool isOrderShouldPickHive();
         bool isOrderShouldDropHive();
         bool setOrderState(const OrderState& state);
         void setOrderTags(const std::vector<std::string>& tags);
+        void setDensityInfo(const road_control::density_srvResponse density);
+        void setFirstDensityInfo(const bool moveable, const double value, const int times);
         std::string computeHiveChargeStationId();
         nlohmann::json toJson();
         nlohmann::json computeOrderExecuteCommand();
@@ -166,6 +174,11 @@ namespace cti
         inline const auto& robotChargingContinue() const { return robotChargingContinue_; }
         inline const auto& getFallbackWaypointId() const {return fallbackWaypointId_; }
         inline const auto& isSterilizeOrderReachedStation() const { return isSterilizeOrderReachedStation_; }
+        inline const auto& getValueOfDensity() const { return std::get<1>(densityInfo_); }
+        inline const auto& getMoveableFromDensity() const { return std::get<0>(densityInfo_); }
+        inline const auto& getFrontTimesOfDensity() const { return std::get<2>(frontDensityInfo_); }
+        inline const auto& getFrontValueOfDensity() const { return std::get<1>(frontDensityInfo_); }
+        inline const auto& getFrontMoveableFromDensity() const { return std::get<0>(frontDensityInfo_); }
     };
   }
 }

@@ -21,6 +21,8 @@ namespace cti
 
         virtual bool isDeviceIdle() = 0;
 
+        virtual bool  isRobotFault() = 0;
+
         virtual bool  isZigbeeModuleFault() = 0;
 
         virtual bool isDeviceStatusOk() = 0;
@@ -41,13 +43,21 @@ namespace cti
 
         virtual std::string getBuildingId() = 0;
 
+        virtual std::string getCurrentBuilding() = 0;
+
         virtual std::string getCurrentFloor() = 0;
 
         virtual bool isHiveAttachedOnRobot() = 0;
 
+        virtual bool rebootZigbeeModule() = 0;
+
         virtual std::string getRobotCloudId() = 0;
 
         virtual bool updateStationOccupyRelationship() = 0;
+
+        virtual void setZigbeeFault(bool fault) = 0;
+
+        virtual void setHiveOccupyStation(const std::string& hiveId, const std::string& stationId) = 0;
 
         virtual bool setRobotState(const RobotState& state) = 0;
 
@@ -97,7 +107,7 @@ namespace cti
 
         virtual void foreachChargingStation(std::function<bool(std::shared_ptr<StationModel>)> handler) = 0;
 
-        virtual void foreachElevatorDodgeStation(std::function<bool(std::shared_ptr<StationModel>)> handler) = 0;
+        virtual void foreachDodgeStation(std::function<bool(std::shared_ptr<StationModel>)> handler) = 0;
     };
   }
 }

@@ -14,6 +14,11 @@ namespace cti
         bool stillCommandTransmited_{false};
         bool recovercommandtransmited_{false};
 
+        bool lastClearGoalFlag_;
+        bool lastMoveable_ = true;
+        double densityRange_ = 10.0;
+        bool partialDensity_ = true;
+
         int shouldRebootIdleTimeThreshold_;
         int shouldRebootUptimeThreshold_;
         int rebootLowerTime_;
@@ -31,6 +36,7 @@ namespace cti
         std::shared_ptr<ScheduleOrder> currentLocalOrder_;
         std::list<std::shared_ptr<ScheduleOrder>> localScheduleOrders_;
 
+        std::chrono::system_clock::time_point lastAbortPublishSec_;
         std::chrono::system_clock::time_point lastOrderOrCommandUpdateSec_;
 
         std::shared_timed_mutex mutex_;
@@ -51,6 +57,8 @@ namespace cti
         ros::Subscriber missionRebootTimeSubscriber_;
         ros::Subscriber missionForceRebootSubscriber_;
         ros::Subscriber missionRelocateSubscriber_;
+        ros::Publisher clearGoalPublisher_;
+        ros::ServiceClient densityClient_;
 
         bool isCommandChanged(const nlohmann::json& command)
         {
@@ -226,6 +234,91 @@ namespace cti
           return dodgeStation;
         }
 
+        std::string findDodgeWaypoint(const std::string& destinationId)
+        {
+          double bestDodgeWaypointCost = std::numeric_limits<double>::max();
+          StationModel waypoint;
+          std::string bestDodgeWaypointId;
+          auto pathPlanner = cti::missionSchedule::common::getContainer()->resolveOrNull<IPathPlanner>();
+          auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+          auto robotPtr = deviceUtility->getRobotInfo();
+          std::string robotId = robotPtr->robotId();
+          std::string currentFloor = robotPtr->currentFloor();
+          Position currentPosition = robotPtr->location();
+          Position targetPosition = currentPosition;
+          if (deviceUtility->getWaypointInfo(destinationId, waypoint))
+          {
+            targetPosition = waypoint.coordinate();
+          }
+          deviceUtility->foreachDodgeStation([currentFloor, currentPosition, targetPosition, robotId, pathPlanner, deviceUtility, &bestDodgeWaypointId, &bestDodgeWaypointCost](std::shared_ptr<StationModel> station)
+          {
+            double stationDodgeCost = 0.0;
+            if (currentFloor != station->floor())
+            {
+              return false;
+            }
+            SPDLOG_INFO("Mission Planner target dodge check station {}", station->name());
+            double targetDodgeDistance = pathPlanner->calculatePathCost(targetPosition, station->coordinate(), currentFloor);
+            double robotDodgeDistance = pathPlanner->calculatePathCost(currentPosition, station->coordinate(), currentFloor);
+            if (targetDodgeDistance > 30.0)
+            {
+              return false;
+            }
+            if (!station->occupiedRobotId().empty())
+            {
+              if (std::find(station->occupiedRobotId().begin(), station->occupiedRobotId().end(), robotId) == station->occupiedRobotId().end())
+              {
+                return false;
+              }
+            }
+            deviceUtility->foreachSystemRobot([currentFloor, robotDodgeDistance, robotId, &stationDodgeCost, stationPtr = std::weak_ptr<StationModel>(station), pathPlanner](std::shared_ptr<RobotUtility> robot)
+            {
+              if (robot->robotId() == robotId || robot->currentFloor() != currentFloor || !robot->localizedSet() || !robot->localized())
+              {
+                return false;
+              }
+              auto station = stationPtr.lock();
+              double dodgeDistance = pathPlanner->calculatePathCost(robot->location(), station->coordinate(), currentFloor);
+              if (station->isInsideOccupyArea(robot->localDestination()))
+              {
+                SPDLOG_INFO("Mission Planner target dodge check with robot {} id", robot->robotId());
+                if (robot->robotState() != RobotState::FAULT)
+                {
+                  if (std::abs(dodgeDistance - robotDodgeDistance) > 0.5)
+                  {
+                    if (dodgeDistance > robotDodgeDistance)
+                    {
+                      stationDodgeCost += 10.0;
+                    }
+                    else
+                    {
+                      stationDodgeCost += 100.0;
+                    }
+                  }
+                  else if (std::atoi(robot->robotId().data()) < std::atoi(robotId.data()))
+                  {
+                    stationDodgeCost += 100.0;
+                  }
+                  else
+                  {
+                    stationDodgeCost += 10.0;
+                  }
+                }
+              }
+              return false;
+            });
+            SPDLOG_INFO("Mission Planner target dodge check station {} cost {}", station->name(), stationDodgeCost);
+            if (stationDodgeCost < bestDodgeWaypointCost && stationDodgeCost < 100)
+            {
+              bestDodgeWaypointCost = stationDodgeCost;
+              bestDodgeWaypointId = station->id();
+            }
+            return false;
+          });
+          SPDLOG_INFO("Mission Planner best target dodge station {} cost {}", bestDodgeWaypointId, bestDodgeWaypointCost);
+          return bestDodgeWaypointId;
+        }
+
         bool findElevatorDodgeWaypoint(const std::string& elevatorId, std::string& dodgeWaypointId)
         {
           double bestDodgeWaypointCost = std::numeric_limits<double>::max();
@@ -238,7 +331,7 @@ namespace cti
           std::string currentFloor = robotPtr->currentFloor();
           Position currentPosition = robotPtr->location();
           Position elevatorEnterPosition = elevatorPlanner->getElevatorEnterPosition(elevatorId, currentFloor);
-          deviceUtility->foreachElevatorDodgeStation([currentFloor, currentPosition, elevatorEnterPosition, robotId, pathPlanner, deviceUtility, &bestDodgeWaypointId, &bestDodgeWaypointCost](std::shared_ptr<StationModel> station)
+          deviceUtility->foreachDodgeStation([currentFloor, currentPosition, elevatorEnterPosition, robotId, pathPlanner, deviceUtility, &bestDodgeWaypointId, &bestDodgeWaypointCost](std::shared_ptr<StationModel> station)
           {
             double stationDodgeCost = 0.0;
             if (currentFloor != station->floor())
@@ -248,7 +341,7 @@ namespace cti
             SPDLOG_INFO("Mission Planner elevator dodge check station {}", station->name());
             double elevatorDodgeDistance = pathPlanner->calculatePathCost(elevatorEnterPosition, station->coordinate(), currentFloor);
             double robotDodgeDistance = pathPlanner->calculatePathCost(currentPosition, station->coordinate(), currentFloor);
-            if (elevatorDodgeDistance > 8.0)
+            if (elevatorDodgeDistance > 30.0)
             {
               return false;
             }
@@ -412,6 +505,7 @@ namespace cti
         bool computeCommandWithElevatorPlan(nlohmann::json& command)
         {
           StationModel waypoint;
+          std::string preferElevatorId;
           std::vector<std::string> orderTags;
           auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
           if (!command.contains("waypointId") || !deviceUtility->getWaypointInfo(command["waypointId"], waypoint))
@@ -426,9 +520,15 @@ namespace cti
               orderTags.push_back(command["orderTags"][tagCount].get<std::string>());
             }
           }
+          if (command.contains("elevatorId"))
+          {
+            preferElevatorId = command["elevatorId"].get<std::string>();
+            SPDLOG_INFO("Mission Planner prefer elevator {}", preferElevatorId);
+          }
+
           auto robotPtr = deviceUtility->getRobotInfo();
           auto elevatorPlanner = cti::missionSchedule::common::getContainer()->resolveOrNull<IElevatorPlanner>();
-          auto elevatorPlan = elevatorPlanner->calculateBestElevatorPlan(robotPtr->location(), robotPtr->currentFloor(), waypoint, true, orderTags);
+          auto elevatorPlan = elevatorPlanner->calculateBestElevatorPlan(robotPtr->location(), robotPtr->currentFloor(), waypoint, true, orderTags, preferElevatorId);
           if (elevatorPlan.cost < 0 || elevatorPlan.cost >= 1000)
           {
             command["reason"] = "无可用电梯";
@@ -436,8 +536,9 @@ namespace cti
           }
           if (!elevatorPlan.planSteps.empty())
           {
-            if (command_.contains("elevatorId") && command_.at("elevatorId").get<std::string>() != elevatorPlan.planSteps[0].elevatorId)
+            if (command.contains("elevatorId") && command.at("elevatorId").get<std::string>() != elevatorPlan.planSteps[0].elevatorId)
             {
+              command["ignoreCommandId"] = command["id"];
               command["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
               command["reason"] = "换梯";
             }
@@ -879,7 +980,16 @@ namespace cti
             missionRebootTimeSubscriber_ = nodeHandle->subscribe("/mission_schedule/reboot_time", 10, &MissionPlanner::onMissionRobootTime, this);
             missionForceRebootSubscriber_ = nodeHandle->subscribe("/mission_schedule/force_reboot", 10, &MissionPlanner::onMissionForceReboot, this);
             missionRelocateSubscriber_ = nodeHandle->subscribe("/mission_schedule/relocate", 10, &MissionPlanner::onMissionRelocate, this);
+            densityClient_ = nodeHandle->serviceClient<road_control::density_srv>("/road_control/density_info");
+            clearGoalPublisher_ = nodeHandle->advertise<std_msgs::String>("/mission_schedule/clear_goal", 10);
+            nodeHandle->param("/mission_schedule/partial_density", partialDensity_, true);
+            nodeHandle->param("/mission_schedule/density_range", densityRange_, 10.0);
           }
+
+          lastClearGoalFlag_ = true;
+          ros::Duration(0.1).sleep();
+          // init : pub clear goal to false
+          publishClearGoal(false);
         }
 
         ~MissionPlanner()
@@ -927,6 +1037,15 @@ namespace cti
               command_.clear();
             }
           }
+          if (missionResult.contains("commandState") && "COMPLETED" == missionResult.at("commandState").get<std::string>())
+          {
+            if (missionResult.contains("commandType") && "PICK_UP" == missionResult.at("commandType").get<std::string>())
+            {
+            }
+            else if (missionResult.contains("commandType") && "DROP_OFF" == missionResult.at("commandType").get<std::string>())
+            {
+            }
+          }
           auto missionCenter = cti::missionSchedule::common::getContainer()->resolveOrNull<IPlatformMissionCenter>();
           if (!missionResult.contains("orderId"))
           {
@@ -971,71 +1090,17 @@ namespace cti
 
         void onMissionRelocate(const mission_schedule::coordinatesMsg& msg)
         {
-          nlohmann::json command;
-          std_msgs::String missionMsg;
           Position location;
+          std_msgs::String missionMsg;
           if (fabs(msg.x) > 1e-15 || fabs(msg.y) > 1e-15 || fabs(msg.yaw) > 1e-15)
           {
             location.shift(msg.x, msg.y, msg.yaw);
           }
-          nlohmann::json relocateJson;
-          auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
-          auto robotInfo = deviceUtility->getRobotInfo();
-          if (location.valid())
+          nlohmann::json relocateJson = computeRelocateCommand(location, msg.floorName, msg.buildingName);
+          if (relocateJson.empty())
           {
-            relocateJson["coordinates"] = location.toJson();
-            SPDLOG_INFO("MissionPlanner user input data is valided");
-          }
-          else if (!robotInfo->currentStation().expired())
-          {
-            auto station = robotInfo->currentStation().lock();
-            relocateJson = station->toJson();
-            SPDLOG_INFO("MissionPlanner use station location");
-          }
-          else if (robotInfo->location().valid())
-          {
-            relocateJson["coordinates"] = robotInfo->location().toJson();
-            SPDLOG_INFO("MissionPlanner use unknow location");
-          }
-          else
-          {
-            SPDLOG_ERROR("MissionPlanner all location invalid");
             return;
           }
-
-          if (!msg.floorName.empty())
-          {
-            relocateJson["floorName"] = msg.floorName;
-          }
-          else if (!deviceUtility->getCurrentFloor().empty())
-          {
-            relocateJson["floorName"] = deviceUtility->getCurrentFloor();
-          }
-          else
-          {
-            SPDLOG_ERROR("MissionPlanner all floor name is empty");
-            return;
-          }
-
-          if (!msg.buildingName.empty())
-          {
-            relocateJson["mapFileDirectory"] = msg.buildingName;
-            SPDLOG_INFO("MissionPlanner use map :{}",msg.buildingName);
-          }
-          else if (!robotInfo->buildingName().empty())
-          {
-            relocateJson["mapFileDirectory"] = robotInfo->buildingName();
-          }
-          else
-          {
-            SPDLOG_ERROR("MissionPlanner all map name is empty");
-            return;
-          }
-          relocateJson["commandType"] = "RELOCATE";
-          relocateJson["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
-          relocateJson["coopMode"] = "LOCAL";
-          relocateJson["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
-          relocateJson["buildingId"] = deviceUtility->getBuildingId();
           SPDLOG_INFO("MissionPlanner relocate command {}", relocateJson.dump());
           publishRelocateCommand(relocateJson);
         }
@@ -1050,17 +1115,7 @@ namespace cti
           {
             location.shift(msg.x, msg.y, msg.yaw);
           }
-          if (location.valid())
-          {
-            if (!storeRelocateToLocalStorage(location, msg.floorName, msg.buildingName))
-            {
-              return;
-            }
-          }
-          else if (!storeRelocateToLocalStorage())
-          {
-            return;
-          }
+          storeRelocateToLocalStorage(location, msg.floorName, msg.buildingName);
           command["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
           command["commandType"] = "RESTART";
           command["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
@@ -1254,7 +1309,7 @@ namespace cti
         {
           auto missionCenter = cti::missionSchedule::common::getContainer()->resolve<IPlatformMissionCenter>();
           nlohmann::json newCommand = missionCenter->computeOrderCommand();
-          if (newCommand.empty() || !newCommand.contains("waypointId"))
+          if ((newCommand.empty() || newCommand.contains("useMock")) || !newCommand.contains("waypointId"))
           {
             return false;
           }
@@ -1357,11 +1412,14 @@ namespace cti
           command["commandType"] = "ABORT";
           command["scheduleType"] = "ROBOT_STILL";
           command["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
-          if (!stillCommandTransmited_)
+          std::chrono::system_clock::time_point currentSec = std::chrono::system_clock::now();
+          int lastAbortDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - lastAbortPublishSec_).count();
+          if (!stillCommandTransmited_ || lastAbortDuration > 9)
           {
             command_ = command;
             missionMsg.data = command.dump();
             missionPublisher_.publish(missionMsg);
+            lastAbortPublishSec_ = std::chrono::system_clock::now();
             stillCommandTransmited_ = !stillCommandTransmited_ ;
             SPDLOG_INFO("MissionPlanner still behavior publish command {}", missionMsg.data);
             return true;
@@ -1397,7 +1455,67 @@ namespace cti
           std::unique_lock<std::shared_timed_mutex> lk(mutex_);
           auto missionCenter = cti::missionSchedule::common::getContainer()->resolve<IPlatformMissionCenter>();
           nlohmann::json command = missionCenter->computeCloudDirectCommand();
-          if (!command.empty())
+
+          ROS_INFO("[density]executeCloudDirectCommand :  command size: %d, Data: %s", command.size(), command.dump().c_str());
+          SPDLOG_INFO("[density]executeCloudDirectCommand : command size: {}, Data: {}", command.size(), command.dump());
+
+          if (!command.empty() && command.contains("moveable") && command.contains("id"))
+          {
+            auto moveable = command["moveable"].get<bool>();
+            auto commandId = command["id"].get<std::string>();
+            SPDLOG_INFO("[density]executeCloudDirectCommand : moveable: {}, lastMoveable: {}", moveable, lastMoveable_);
+            if (!moveable)
+            {
+              publishAbortCommand("", true);
+              auto newCommand = command;
+              newCommand["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
+              newCommand["commandState"] = "PENDING";
+              missionCenter->updatePlatformCommand(commandId, newCommand);
+              lastMoveable_ = moveable;
+              return false;
+            }
+            else
+            {
+              lastMoveable_ = moveable;
+              publishClearGoal(false);
+            }
+
+          }
+          else if (!command.empty() && command.contains("commandType") && command["commandType"] == "ABORT")
+          {
+            publishClearGoal(true);
+          }
+          else if (!command.empty() && command.contains("coordinates") && command.contains("id") && 
+              command.contains("commandType") && command["commandType"] == "MOVE")
+          {
+            auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+            auto robotPtr = deviceUtility->getRobotInfo();
+            Position coordinate{};
+            coordinate.parseFromJson(command.at("coordinates"));
+            auto densityRes = callDensityServer(robotPtr, coordinate);
+            bool moveable = densityRes.moveable;
+            auto resdata = densityRes.data;
+            auto commandId = command["id"].get<std::string>();
+            
+            SPDLOG_INFO("[density]executeCloudDirectCommand : moveable: {}, lastMoveable: {}", moveable, lastMoveable_);
+            if (!moveable)
+            {
+              publishAbortCommand("", true);
+              auto newCommand = command;
+              newCommand["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
+              newCommand["commandState"] = "PENDING";
+              missionCenter->updatePlatformCommand(commandId, newCommand);
+              lastMoveable_ = moveable;
+              return false;
+            }
+            else
+            {
+              lastMoveable_ = moveable;
+              publishClearGoal(false);
+            }
+          }
+
+          if (!command.empty() && command.contains("queueing") && command["queueing"].get<bool>())
           {
             std_msgs::String missionMsg;
             command_ = command;
@@ -1407,6 +1525,7 @@ namespace cti
             missionCenter->updatePlatformMissionState(command);
             missionPublisher_.publish(missionMsg);
             plannerState_ = ScheduleState::PLATFORM_RUNNING;
+            SPDLOG_INFO("[density]MissionPlanner Cloud direct publish command {}", missionMsg.data);
             SPDLOG_INFO("MissionPlanner Cloud direct publish command {}", missionMsg.data);
           }
           return true;
@@ -1427,7 +1546,100 @@ namespace cti
           {
             return true;
           }
+
           nlohmann::json command = missionCenter->computeOrderCommand();   // get command
+
+          if (!command.empty() && command.contains("moveable"))
+          {
+            bool moveable = command["moveable"].get<bool>();
+            SPDLOG_INFO("executePlatformMission[density]: moveable: {}, lastMoveable: {}", moveable, lastMoveable_);
+            if (!moveable)
+            {
+              publishAbortCommand("", true);
+              lastMoveable_ = moveable;
+              return true;
+            }
+            lastMoveable_ = moveable;
+            publishClearGoal(false);
+          }
+          if (command.empty() || command.contains("useMock"))
+          {
+            if (command.contains("useMock"))
+            {
+              SPDLOG_INFO("executePlatformMission[density]: use mock command.");
+            }
+            command.clear();
+            SPDLOG_INFO("executePlatformMission[density]: command clear, emptied[{}]", command.empty());
+          }
+
+          if (!command.empty() && command.contains("orderId") && command.contains("waypointId") && 
+            command.contains("shouldDodge") && command["shouldDodge"].get<bool>())
+          {
+            std::string dodgeWaypointId = findDodgeWaypoint(command["waypointId"]);
+            if (!dodgeWaypointId.empty())
+            {
+              SPDLOG_INFO("MissionPlanner target dodge waypointId {}", dodgeWaypointId);
+              StationModel waypoint;
+              auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+              if (deviceUtility->getWaypointInfo(dodgeWaypointId, waypoint))
+              {
+                nlohmann::json dodgeCommand = command;
+                dodgeCommand["commandType"] = "MOVE";
+                dodgeCommand["horizontalOffset"] = 0.0;
+                if (dodgeCommand.find("id") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("id"));
+                }
+                if (dodgeCommand.find("orderId") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("orderId"));
+                }
+                if (dodgeCommand.find("elevatorId") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("elevatorId"));
+                }
+                if (dodgeCommand.find("floorId") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("floorId"));
+                }
+                if (dodgeCommand.find("floorName") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("floorName"));
+                }
+                if (dodgeCommand.find("waypointId") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("waypointId"));
+                }
+                if (dodgeCommand.find("waypointType") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("waypointType"));
+                }
+                if (dodgeCommand.find("coordinates") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("coordinates"));
+                }
+                if (dodgeCommand.find("sterilizationMovement") != dodgeCommand.end())
+                {
+                  dodgeCommand.erase(dodgeCommand.find("sterilizationMovement"));
+                }
+                dodgeCommand = mergeJson(dodgeCommand, waypoint.toJson());
+                dodgeCommand["coopMode"] = "LOCAL";
+                dodgeCommand["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
+                dodgeCommand["dodgeCommandId"] = boost::uuids::to_string(boost::uuids::random_generator()());
+                SPDLOG_INFO("MissionPlanner target dodge origin command {}", dodgeCommand.dump());
+                if (!dodgeCommand.empty() && isCommandChanged(dodgeCommand))
+                {
+                  command_ = dodgeCommand;
+                  dodgeCommand["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
+                  missionMsg.data = dodgeCommand.dump();
+                  missionPublisher_.publish(missionMsg);
+                  SPDLOG_INFO("MissionPlanner target dodge publish command {}", missionMsg.data);
+                }
+                return true;
+              }
+            }
+          }
+
           if (command.empty() &&
               command_.contains("orderId") &&
               command_.contains("elevatorId") &&
@@ -1711,7 +1923,7 @@ namespace cti
             return true;
           }
           auto command = currentLocalOrder_->computeOrderExecuteCommand();
-          if (command.empty() &&
+          if ((command.empty() || command.contains("useMock")) &&
               command_.contains("orderId") &&
               command_.contains("elevatorId") &&
               command_.contains("scheduleType") &&
@@ -1862,7 +2074,7 @@ namespace cti
             return true;
           }
           auto command = currentLocalOrder_->computeOrderExecuteCommand();
-          if (command.empty() &&
+          if ((command.empty() || command.contains("useMock")) &&
               command_.contains("orderId") &&
               command_.contains("elevatorId") &&
               command_.contains("scheduleType") &&
@@ -1972,7 +2184,7 @@ namespace cti
           return true;
         }
 
-        bool publishAbortCommand(const std::string orderId = "")
+        bool publishAbortCommand(const std::string orderId = "", const bool densityCtrl = false)
         {
           nlohmann::json command;
           std_msgs::String missionMsg;
@@ -1983,16 +2195,19 @@ namespace cti
           {
             command["orderId"] = orderId;
           }
+          command["densityCtrl"] = densityCtrl;
           command["commandType"] = "ABORT";
           command["scheduleType"] = "LOCAL_CANCEL";
           command["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
           command["localCreateTime"] = std::chrono::high_resolution_clock::now();
+          publishClearGoal(!densityCtrl);
           if (isCommandChanged(command) || RobotState::IDLE != robotInfo->robotState())
           {
             command_ = command;
             missionMsg.data = command_.dump();
             missionPublisher_.publish(missionMsg);
             SPDLOG_INFO("MissionPlanner publish abort command {}", missionMsg.data);
+            SPDLOG_INFO("[density]MissionPlanner publish abort command {}", missionMsg.data);
             return true;
           }
           return false;
@@ -2191,91 +2406,58 @@ namespace cti
           return true;
         }
 
-        bool storeRelocateToLocalStorage(Position& location, std::string floorName, std::string buildingName) override
+        nlohmann::json computeRelocateCommand(const Position& location, std::string floorName, std::string buildingName)
         {
           nlohmann::json relocateJson;
           auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
           auto robotInfo = deviceUtility->getRobotInfo();
-          time_t now;
-          time(&now);
-          if (!floorName.empty())
+          if ((robotInfo->localized() && robotInfo->location().valid()) || location.valid())
           {
-            relocateJson["floorName"] = floorName;
-          }
-          else if (!deviceUtility->getCurrentFloor().empty())
-          {
-            relocateJson["floorName"] = deviceUtility->getCurrentFloor();
-          }
-          else
-          {
-            SPDLOG_ERROR("floorName: user input:\"{}\" robot save:\"{}\" error", floorName, deviceUtility->getCurrentFloor());
-            return false;
-          }
-          if (!buildingName.empty())
-          {
-            relocateJson["mapFileDirectory"] = buildingName;
-          }
-          else if (!robotInfo->buildingName().empty())
-          {
+            relocateJson["commandType"] = "RELOCATE";
+            relocateJson["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
+            relocateJson["coopMode"] = "LOCAL";
+            relocateJson["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
+            relocateJson["buildingId"] = deviceUtility->getBuildingId();
             relocateJson["mapFileDirectory"] = robotInfo->buildingName();
-          }
-          else
-          {
-            SPDLOG_ERROR("mapName: user input:\"{}\" robot save:\"{}\" error", buildingName, robotInfo->buildingName());
-            return false;
-          }
-          relocateJson["coordinates"] = location.toJson();
-          relocateJson["commandType"] = "RELOCATE";
-          relocateJson["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
-          relocateJson["coopMode"] = "LOCAL";
-          relocateJson["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
-          relocateJson["buildingId"] = deviceUtility->getBuildingId();
-          relocateJson["time"] = now;
-          if (auto robotInfo = deviceUtility->getRobotInfo())
-          {
-            if (!robotInfo->hiveAttachedOnRobot().empty())
+            relocateJson["floorName"] = deviceUtility->getCurrentFloor();
+            if (location.valid())
             {
-              relocateJson["hiveId"] = robotInfo->hiveAttachedOnRobot();
+              if (!floorName.empty())
+              {
+                relocateJson["floorName"] = floorName;
+              }
+              if (!buildingName.empty())
+              {
+                relocateJson["mapFileDirectory"] = buildingName;
+              }
+              relocateJson["coordinates"] = location.toJson();
+            }
+            else if (!robotInfo->currentStation().expired())
+            {
+              auto station = robotInfo->currentStation().lock();
+              relocateJson = mergeJson(relocateJson, station->toJson());
+            }
+            else if (robotInfo->location().valid())
+            {
+              relocateJson["coordinates"] = robotInfo->location().toJson();
             }
           }
-          std::string content = relocateJson.dump();
-          std::ofstream fs(locationStoragePath_, std::ios::out | std::ios::trunc);
-          fs.write(content.c_str(), content.size());
-          SPDLOG_INFO("Mission Planner store relocate json :{}", content);
-          fs.flush();
-          fs.close();
-          return true;
+          return relocateJson;
         }
 
-        bool storeRelocateToLocalStorage() override
+        bool storeRelocateToLocalStorage(const Position& location = Position(), std::string floorName = std::string(), std::string buildingName = std::string())
         {
           nlohmann::json relocateJson;
           auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
           auto robotInfo = deviceUtility->getRobotInfo();
           time_t now;
           time(&now);
-          if (!robotInfo->currentStation().expired())
-          {
-            auto station = robotInfo->currentStation().lock();
-            relocateJson = station->toJson();
-          }
-          else if(!deviceUtility->getCurrentFloor().empty() && robotInfo->location().valid())
-          {
-            relocateJson["floorName"] = deviceUtility->getCurrentFloor();
-            relocateJson["coordinates"] = robotInfo->location().toJson();
-          }
-          else
-          {
-            SPDLOG_ERROR("floorName\"{}\" error or location invalid", deviceUtility->getCurrentFloor());
-            return false;
-          }
-          relocateJson["commandType"] = "RELOCATE";
-          relocateJson["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
-          relocateJson["coopMode"] = "LOCAL";
-          relocateJson["requestedBy"] = "39136da7-56a5-49ff-85b3-967803f4e1ee";
-          relocateJson["buildingId"] = deviceUtility->getBuildingId();
-          relocateJson["mapFileDirectory"] = robotInfo->buildingName();
           relocateJson["time"] = now;
+          if (deviceUtility->isZigbeeModuleFault())
+          {
+            relocateJson["zigbeeFault"] = true;
+          }
+          relocateJson = mergeJson(relocateJson, computeRelocateCommand(location, floorName, buildingName));
           if (auto robotInfo = deviceUtility->getRobotInfo())
           {
             if (!robotInfo->hiveAttachedOnRobot().empty())
@@ -2320,10 +2502,13 @@ namespace cti
 
         bool robotAutonomicReboot() override
         {
-          if (!storeRelocateToLocalStorage())
+          auto deviceUtility = cti::missionSchedule::common::getContainer()->resolveOrNull<IDeviceRuntimeUtility>();
+          auto robotState = deviceUtility->getRobotInfo()->robotState();
+          if (robotState == RobotState::DOCKING || robotState == RobotState::UNSTOPABLE || robotState == RobotState::LIFTING)
           {
-            return false;
+            return true;
           }
+          storeRelocateToLocalStorage();
           nlohmann::json command;
           std_msgs::String missionMsg;
           command["id"] = boost::uuids::to_string(boost::uuids::random_generator()());
@@ -2364,6 +2549,78 @@ namespace cti
           SPDLOG_INFO("MissionPlanner binding local hive :[{}]",command.dump());
           missionPublisher_.publish(missionMsg);
           return true;
+        }
+
+        bool publishClearGoal(const bool clearGoal)
+        {
+          // pub false if have density_info
+          nlohmann::json command;
+          std_msgs::String msg;
+          // if (clearGoal != lastClearGoalFlag_)
+          {
+            SPDLOG_INFO("[density]publishClearGoal : pub clear goal {}", clearGoal);
+            command["clearGoal"] = clearGoal;
+            msg.data = command.dump();
+            // ros::Duration(0.1).sleep();
+            clearGoalPublisher_.publish(msg);
+            lastClearGoalFlag_ = clearGoal;
+          }
+          return true;
+        }
+
+        road_control::density_srvResponse callDensityServer(std::shared_ptr<cti::missionSchedule::RobotUtility> robot, Position destination)
+        {
+          road_control::density_srv densitySrv;
+          std::string robotId = robot->robotId();
+          auto robotPosition = robot->location();
+
+          geometry_msgs::PoseStamped start;
+          geometry_msgs::PoseStamped goal;
+
+          start.header.frame_id = "map";
+          start.header.stamp = ros::Time::now();
+          start.pose.position.x = robotPosition.slam.position.x;
+          start.pose.position.y = robotPosition.slam.position.y;
+          start.pose.position.z = robotPosition.slam.position.z;
+          start.pose.orientation.w = robotPosition.slam.orientation.w;
+          start.pose.orientation.x = robotPosition.slam.orientation.x;
+          start.pose.orientation.y = robotPosition.slam.orientation.y;
+          start.pose.orientation.z = robotPosition.slam.orientation.z;
+
+          goal.header.frame_id = "map";
+          goal.header.stamp = ros::Time::now();
+          goal.pose.position.x = destination.slam.position.x;
+          goal.pose.position.y = destination.slam.position.y;
+          goal.pose.position.z = destination.slam.position.z;
+          goal.pose.orientation.w = destination.slam.orientation.w;
+          goal.pose.orientation.x = destination.slam.orientation.x;
+          goal.pose.orientation.y = destination.slam.orientation.y;
+          goal.pose.orientation.z = destination.slam.orientation.z;
+
+          densitySrv.request.robot_id = robotId;
+          densitySrv.request.start = start;
+          densitySrv.request.goal = goal;
+          densitySrv.request.partial = partialDensity_;
+          densitySrv.request.length = densityRange_;
+
+          SPDLOG_INFO("callDensityServer[density]: {} Call service {}. partial: {}, length: {}, start({},{}), goal({},{})", robotId, "/road_control/density_info", 
+            partialDensity_, densityRange_, start.pose.position.x, start.pose.position.y, goal.pose.position.x, goal.pose.position.y);
+          ROS_INFO("callDensityServer[density] : %s Call service /road_control/density_info", densitySrv.request.robot_id.c_str());
+
+          if (densityClient_.call(densitySrv))
+          {
+            ROS_INFO("callDensityServer[density]: %s[%d], %s", robotId.c_str(), densitySrv.response.moveable, densitySrv.response.data.c_str());
+            SPDLOG_INFO("callDensityServer[density]: {}[{}], {}", robotId, densitySrv.response.moveable, densitySrv.response.data);
+            return densitySrv.response;
+          }
+          else
+          {
+            SPDLOG_INFO("callDensityServer[density]: {} Failed to call service {}", robotId, "/road_control/density_info");
+            road_control::density_srvResponse res;
+            res.data = "";
+            res.moveable = true;
+            return res;
+          }
         }
     };
 

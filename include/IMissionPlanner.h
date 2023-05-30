@@ -54,12 +54,11 @@ namespace cti
 
         virtual bool broadcastDesiredDestination() = 0;
 
-        virtual bool publishAbortCommand(const std::string orderId) = 0;
+        virtual bool publishAbortCommand(const std::string orderId, const bool densityCtrl) = 0;
 
         virtual std::string pickBetterChargingStation(const std::string& robotId, const std::vector<std::string> chargingStations) = 0;
 
         virtual std::string allocateChargingStationToRobot(const std::string& robotId) = 0;
-
 
         virtual bool addBanedStation(std::string& stationId) = 0;
 
@@ -69,15 +68,15 @@ namespace cti
 
         virtual bool robotAutonomicReboot() = 0;
 
-        virtual bool storeRelocateToLocalStorage() = 0;
-
-        virtual bool storeRelocateToLocalStorage(Position& location, std::string floorName, std::string mapName) = 0;
-
         virtual nlohmann::json readRelocateFromLocalStorage() = 0;
 
         virtual bool publishRelocateCommand(const nlohmann::json& relocateJson) = 0;
 
         virtual bool bindLocalHive(bool up, const std::string& hiveId) = 0;
+
+        virtual bool publishClearGoal(const bool clearGoal) = 0;
+
+        virtual road_control::density_srvResponse callDensityServer(std::shared_ptr<cti::missionSchedule::RobotUtility> robot, Position destination) = 0;
     };
   }
 }

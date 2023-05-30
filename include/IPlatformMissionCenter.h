@@ -56,6 +56,8 @@ namespace cti
         virtual bool executeSterilizeNextStep() = 0;
 
         virtual void showAllPlatformOrders() = 0;
+
+        virtual void updatePlatformCommand(std::string oldCommandId, nlohmann::json command) = 0;
     };
   }
 }

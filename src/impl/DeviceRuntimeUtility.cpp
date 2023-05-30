@@ -10,6 +10,7 @@ namespace cti
       private:
         bool stillMode_{false};
         bool manualMode_{false};
+        bool zigbeeModuleEnable_{true};
         bool zigbeeModuleFault_{false};
         bool navigationNormalMode_{true};
         bool isDirectedCommandAllowedInStillMode_{false};
@@ -25,6 +26,7 @@ namespace cti
         Position currentLocation_;
         std::string currentFloor_;
         std::string workSpacePath_;
+        std::string currentBuilding_;
         std::string hiveAttachedOnRobotFromInfrary_;
         std::string hiveAttachedOnRobotFromCloud_;
         std::string hiveAttachedOnRobotFromLocal_;
@@ -41,7 +43,7 @@ namespace cti
         std::map<std::string, std::shared_ptr<RobotUtility>> systemInfo_;
         std::unordered_map<std::string, StationDistributionInfo> parkingDistribution_;
         std::unordered_map<std::string, StationDistributionInfo> chargingDistribution_;
-        std::unordered_map<std::string, std::shared_ptr<StationModel>> elevatorDodgeStations_;
+        std::unordered_map<std::string, std::shared_ptr<StationModel>> dodgeStations_;
         std::unordered_map<std::string, std::shared_ptr<StationModel>> parkingStations_;
         std::unordered_map<std::string, std::shared_ptr<StationModel>> chargingStations_;
 
@@ -49,6 +51,7 @@ namespace cti
         std::vector<std::vector<Position>> gateNarrowAreas_;
 
         ros::Publisher infraryPublisher_;
+        ros::Publisher zigbeePowerPublisher_;
 
         ros::Subscriber robotPowerThresholdSubscriber_;
         ros::Subscriber narrowAreaSubscriber_;
@@ -74,6 +77,8 @@ namespace cti
 
         std::chrono::system_clock::time_point robotLastEnableSec_;
         std::chrono::system_clock::time_point lastZigbeeUpdateSec_;
+        std::chrono::system_clock::time_point zigbeeModuleFaultSec_;
+        std::chrono::system_clock::time_point nextZigbeeModuleTriggerSec_;
         std::chrono::system_clock::time_point stillModeExpireTime_;
         std::chrono::system_clock::time_point robotLastNotFaultSec_;
         std::chrono::system_clock::time_point robotStateLastUpdateSec_;
@@ -529,6 +534,11 @@ namespace cti
           return buildingId_;
         }
 
+        std::string getCurrentBuilding()
+        {
+          return currentBuilding_;
+        }
+
         std::string getCurrentFloor()
         {
           return currentFloor_;
@@ -537,6 +547,7 @@ namespace cti
         bool initialize()
         {
           lastZigbeeUpdateSec_ = std::chrono::system_clock::now();
+          zigbeeModuleFaultSec_ = std::chrono::system_clock::now();
           workSpacePath_ = std::string(::getenv("HOME")) + "/.ros/" PROJECT_NAME;
           if (auto ioService = cti::missionSchedule::common::getContainer()->resolveOrNull<boost::asio::io_service>())
           {
@@ -549,13 +560,14 @@ namespace cti
           {
             SPDLOG_INFO("DeviceUtility subscribe ros topic");
             infraryPublisher_ = nodeHandle->advertise<std_msgs::String>("/infrary_communication/infrary_send", 10);
+            zigbeePowerPublisher_ = nodeHandle->advertise<std_msgs::UInt8>("/robot_base/set_zigbee_power", 10);
             robotPowerThresholdSubscriber_ = nodeHandle->subscribe("/robotBatteryThreshold", 1, &DeviceRuntimeUtility::onModifyPowerThreshold, this);
             narrowAreaSubscriber_ = nodeHandle->subscribe("/zones", 1, &DeviceRuntimeUtility::onNarrowArea, this);
             robotStatusSubscriber_ = nodeHandle->subscribe("/robot_state", 1, &DeviceRuntimeUtility::onRobotStatus, this);
             chassisHealthSubscriber_ = nodeHandle->subscribe("/robot_base/health_state", 1, &DeviceRuntimeUtility::onChassisHealth, this);
             chassisBatterySubscriber_ = nodeHandle->subscribe("/robot_base/battery", 1, &DeviceRuntimeUtility::onChassisBattery, this);
             robotSensorSubscriber_ = nodeHandle->subscribe("/robot_base/sensors", 1, &DeviceRuntimeUtility::onRobotSensor, this);
-            robotStateSubscriber_ = nodeHandle->subscribe("runningStatus/notify", 3, &DeviceRuntimeUtility::onRobotStateNotify, this);
+            robotStateSubscriber_ = nodeHandle->subscribe("/cloud_scheduling_node/runningStatus/notify", 3, &DeviceRuntimeUtility::onRobotStateNotify, this);
             // backGardenInfoSubscriber_ = nodeHandle->subscribe("/back_garden/all_devices_info", 1, &DeviceRuntimeUtility::onBackGardenInfo, this);
             cloudRobotStateUpdateSubscriber_ = nodeHandle->subscribe("/cloud_scheduling_node/robot_platform_update", 10, &DeviceRuntimeUtility::onCloudRobotStateUpdate, this);
             cloudWaypointStateUpdateSubscriber_ = nodeHandle->subscribe("/cloud_scheduling_node/waypoint_platform_update", 10, &DeviceRuntimeUtility::onCloudWaypointStateUpdate, this);
@@ -606,7 +618,7 @@ namespace cti
             auto charging = station.second;
             charging->occupiedRobotId().clear();
           }
-          for (auto& station : elevatorDodgeStations_)
+          for (auto& station : dodgeStations_)
           {
             auto dodge = station.second;
             dodge->occupiedRobotId().clear();
@@ -638,7 +650,7 @@ namespace cti
                 SPDLOG_INFO("updateStationOccupyRelationship robot {} occupy charging station {}", robotIter->second->robotId(), charging->name());
               }
             }
-            for (auto& station : elevatorDodgeStations_)
+            for (auto& station : dodgeStations_)
             {
               auto dodge = station.second;
               if (robotIter->second->currentFloor() == dodge->floor() &&
@@ -669,7 +681,51 @@ namespace cti
         bool isDirectedCommandAllowedInStillMode() override
         {
           std::shared_lock<std::shared_timed_mutex> lk(mutex_);
-          return isDirectedCommandAllowedInStillMode_;
+          if (stillMode_)
+          {
+            return isDirectedCommandAllowedInStillMode_;
+          }
+          else
+          {
+            return true;
+          }
+        }
+
+        bool rebootZigbeeModule() override
+        {
+          std::shared_lock<std::shared_timed_mutex> lk(mutex_);
+          if (!zigbeeModuleFault_)
+          {
+            return true;
+          }
+          std::chrono::system_clock::time_point currentSec = std::chrono::system_clock::now();
+          int zigbeeFaultDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - zigbeeModuleFaultSec_).count();
+          if (zigbeeFaultDuration < 10)
+          {
+            return true;
+          }
+          if (nextZigbeeModuleTriggerSec_ < currentSec)
+          {
+            nextZigbeeModuleTriggerSec_ = currentSec + std::chrono::seconds(20);
+            if (zigbeeModuleEnable_)
+            {
+              // disable zigbee power
+              std_msgs::UInt8 msg;
+              msg.data = 3;
+              zigbeePowerPublisher_.publish(msg);
+              SPDLOG_INFO("Disable zigbee module");
+            }
+            else
+            {
+              // enable zigbee power
+              std_msgs::UInt8 msg;
+              msg.data = 2;
+              zigbeePowerPublisher_.publish(msg);
+              SPDLOG_INFO("Enable zigbee module");
+            }
+            zigbeeModuleEnable_ = !zigbeeModuleEnable_;
+          }
+          return true;
         }
 
         void setStillMode(bool stillMode, bool allowDirectCommand, int duration) override
@@ -690,6 +746,11 @@ namespace cti
             for (auto robotIter = systemInfo_.begin(); robotIter != systemInfo_.end();)
             {
               SPDLOG_INFO("GeneralTimer sytem robots : {}", robotIter->second->toString());
+              if (robotId_ == robotIter->second->robotId())
+              {
+                robotIter++;
+                continue;
+              }
               std::chrono::system_clock::time_point localUpdateSec = robotIter->second->lastLocalUpdateSec();
               std::chrono::system_clock::time_point platformUpdateSec = robotIter->second->lastPlatformUpdateSec();
               int localUpdateDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - localUpdateSec).count();
@@ -735,27 +796,42 @@ namespace cti
               robotIter++;
             }
 
+            bool oldZigbeeModuleFault = zigbeeModuleFault_;
             int zigbeeUpdateDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - lastZigbeeUpdateSec_).count();
-            if (zigbeeUpdateDuration > 20)
+            if (zigbeeUpdateDuration > 5)
             {
               if (currentLocation_.valid() && systemInfo_[robotId_]->robotState() != LIFTING)
               {
                 bool shouldZigbeeReceiveMessage = false;
                 for (auto robotIter = systemInfo_.begin(); robotIter != systemInfo_.end(); robotIter++)
                 {
+
                   if (robotIter->second->robotId() != robotId_ &&
                       robotIter->second->currentFloor() == currentFloor_ &&
                       robotIter->second->robotState() != RobotState::LIFTING &&
-                      robotIter->second->chassisState() != ChassisState::DISABLED &&
-                      robotIter->second->location().distanceOf(currentLocation_) < 15.0f)
+                      robotIter->second->robotState() != RobotState::IDLE &&
+                      robotIter->second->robotState() != RobotState::CHARGING &&
+                      robotIter->second->robotState() != RobotState::FAULT &&
+                      robotIter->second->chassisState() != ChassisState::DISABLED)
                   {
-                    shouldZigbeeReceiveMessage = true;
-                    break;
+                    auto pathPlanner = cti::missionSchedule::common::getContainer()->resolveOrNull<cti::missionSchedule::IPathPlanner>();
+                    double robotDistance = pathPlanner->calculatePathCost(robotIter->second->location(),
+                                                                          currentLocation_,
+                                                                          currentFloor_);
+                    if (robotDistance < 20.0)
+                    {
+                      shouldZigbeeReceiveMessage = true;
+                      break;
+                    }
                   }
                 }
                 if (shouldZigbeeReceiveMessage)
                 {
                   zigbeeModuleFault_ = true;
+                }
+                else
+                {
+                  zigbeeModuleFault_ = false;
                 }
               }
             }
@@ -763,8 +839,14 @@ namespace cti
             {
               zigbeeModuleFault_ = false;
             }
+            if (zigbeeModuleFault_ && !oldZigbeeModuleFault)
+            {
+              zigbeeModuleFaultSec_ = std::chrono::system_clock::now();
+            }
 
             auto robotInfo = systemInfo_.at(robotId_);
+            static std::string lastActualHiveAttachedOnRobot = "";
+            static std::chrono::system_clock::time_point lastActualHiveAttachedOnRobotChangeTime = std::chrono::system_clock::now();
             bool hiveAttached = false;
             RobotState robotState = RobotState::DOCKING;
             SPDLOG_INFO("DeviceUtility cloud hive [{}], local hive [{}], infrary hive [{}], actual hive [{}]", hiveAttachedOnRobotFromCloud_,hiveAttachedOnRobotFromLocal_,hiveAttachedOnRobotFromInfrary_,robotInfo->hiveAttachedOnRobot());
@@ -800,6 +882,11 @@ namespace cti
                 robotInfo->setHiveAttachedOnRobot("");
                 SPDLOG_INFO("DeviceUtility set actual hive id is null");
               }
+            }
+            if (lastActualHiveAttachedOnRobot != robotInfo->hiveAttachedOnRobot())
+            {
+              lastActualHiveAttachedOnRobotChangeTime = currentSec;
+              lastActualHiveAttachedOnRobot = robotInfo->hiveAttachedOnRobot();
             }
 
             if (hiveAttachedOnRobotFromInfrary_ != hiveAttachedOnRobotFromLocal_)
@@ -843,7 +930,7 @@ namespace cti
               }
               else
               {
-                SPDLOG_INFO("DeviceUtility local is unbinding, bind cloud hive [{}]", hiveAttachedOnRobotFromInfrary_);
+                SPDLOG_INFO("DeviceUtility local is unbinding, bind cloud with infrary hive [{}]", hiveAttachedOnRobotFromInfrary_);
                 bindingJson["hiveId"] = hiveAttachedOnRobotFromInfrary_;
                 bindingJson["bindingType"] = "binding";
                 shouldBindHive = true;
@@ -853,6 +940,49 @@ namespace cti
                 shouldBindHive = false;
               }
               if (std::chrono::duration_cast<std::chrono::seconds>(currentSec - lastUpdateCloudBindingSec_).count() >= 30 && shouldBindHive && hiveAttached)
+              {
+                updateBindingService.request.str = bindingJson.dump();
+                SPDLOG_INFO("DeviceUtility call service update binding :[{}]", bindingJson.dump());
+                if (updateCloudBindingClient_.call(updateBindingService) && !updateBindingService.response.result)
+                {
+                  SPDLOG_INFO("DeviceUtility call service error:{}", updateBindingService.response.error_message);
+                }
+                lastUpdateCloudBindingSec_ = currentSec;
+              }
+            }
+            else
+            {
+              lastUpdateCloudBindingSec_ = currentSec - std::chrono::seconds(30);
+            }
+
+						auto hiveChangeDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - lastActualHiveAttachedOnRobotChangeTime).count();
+
+            if (robotInfo->hiveAttachedOnRobot() != hiveAttachedOnRobotFromCloud_ && hiveChangeDuration > 5)
+            {
+              auto missionPlanner = cti::missionSchedule::common::getContainer()->resolveOrNull<IMissionPlanner>();
+              nlohmann::json bindingJson;
+              cti_msgs::CtiCommonService updateBindingService;
+              bool shouldBindHive = false;
+              bool shouldUnBindHive = false;
+              if (lastActualHiveAttachedOnRobot.empty())
+              {
+                SPDLOG_INFO("DeviceUtility acutal hive is empty cloud hive [{}] ", hiveAttachedOnRobotFromCloud_);
+                bindingJson["bindingType"] = "unbinding";
+                shouldUnBindHive = true;
+              }
+              else
+              {
+                SPDLOG_INFO("DeviceUtility cloud is unbinding, bind cloud with actual hive [{}]", lastActualHiveAttachedOnRobot);
+                bindingJson["hiveId"] = lastActualHiveAttachedOnRobot;
+                bindingJson["bindingType"] = "binding";
+                shouldBindHive = true;
+              }
+              if ((RobotState::DOCKING == robotState))
+              {
+                shouldBindHive = false;
+                shouldUnBindHive = false;
+              }
+              if (std::chrono::duration_cast<std::chrono::seconds>(currentSec - lastUpdateCloudBindingSec_).count() >= 30 && ((shouldBindHive && hiveAttached) || (shouldUnBindHive && !hiveAttached)))
               {
                 updateBindingService.request.str = bindingJson.dump();
                 SPDLOG_INFO("DeviceUtility call service update binding :[{}]", bindingJson.dump());
@@ -1132,6 +1262,7 @@ namespace cti
           RobotUtility tempInfo;
           robotId_ = msg.robotid;
           currentFloor_ = msg.current_floor;
+          currentBuilding_ = msg.buildingname;
           floorHashValue_ = sfold(msg.current_floor);
           buildingHashValue_ = sfold(msg.buildingname);
           Position location;
@@ -1198,6 +1329,15 @@ namespace cti
             return hiveQrInfo_[hiveQr];
           }
           return std::string();
+        }
+
+        void setHiveOccupyStation(const std::string& hiveId, const std::string& waypointId)
+        {
+          std::unique_lock<std::shared_timed_mutex> lk(mutex_);
+          if (chargingStations_.find(waypointId) != chargingStations_.end())
+          {
+            chargingStations_[waypointId]->hiveOccupyThisStation() = hiveId;
+          }
         }
 
         void onCloudBuildingHivesInfo(const std_msgs::String& msg)
@@ -1645,19 +1785,19 @@ namespace cti
               else if (station.type() == "AVOID")
               {
                 auto elevatorDodgeStation = std::make_shared<StationModel>(station);
-                if (elevatorDodgeStations_.find(stationIter.id) != elevatorDodgeStations_.end())
+                if (dodgeStations_.find(stationIter.id) != dodgeStations_.end())
                 {
-                  auto oldDodgeStation = elevatorDodgeStations_[stationIter.id];
+                  auto oldDodgeStation = dodgeStations_[stationIter.id];
                   if (elevatorDodgeStation->coordinate().distanceOf(oldDodgeStation->coordinate()) > 0.1f)
                   {
                     oldDodgeStation.reset();
-                    elevatorDodgeStations_.erase(stationIter.id);
-                    elevatorDodgeStations_[stationIter.id] = elevatorDodgeStation;
+                    dodgeStations_.erase(stationIter.id);
+                    dodgeStations_[stationIter.id] = elevatorDodgeStation;
                   }
                 }
                 else
                 {
-                  elevatorDodgeStations_[stationIter.id] = elevatorDodgeStation;
+                  dodgeStations_[stationIter.id] = elevatorDodgeStation;
                 }
 
                 SPDLOG_INFO("MissionSchedule receive elevator dodge station {}", elevatorDodgeStation->name());
@@ -1710,12 +1850,12 @@ namespace cti
               }
             }
           }
-          for (auto stationIter = elevatorDodgeStations_.begin(); stationIter != elevatorDodgeStations_.end();)
+          for (auto stationIter = dodgeStations_.begin(); stationIter != dodgeStations_.end();)
           {
             if (elevatorDodgeStationSet.find(stationIter->first) == elevatorDodgeStationSet.end())
             {
               stationIter->second.reset();
-              elevatorDodgeStations_.erase(stationIter++);
+              dodgeStations_.erase(stationIter++);
             }
             else
             {
@@ -2163,7 +2303,34 @@ namespace cti
           return false;
         }
 
-        bool  isZigbeeModuleFault() override
+        bool isRobotFault() override
+        {
+          std::shared_lock<std::shared_timed_mutex> lk(mutex_);
+          std::chrono::system_clock::time_point currentSec = std::chrono::system_clock::now();
+          int localUpdateDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - systemInfo_[robotId_]->lastLocalUpdateSec()).count();
+          if (localUpdateDuration > 60)
+          {
+            return true;
+          }
+          if (!zigbeeModuleFault_)
+          {
+            return false;
+          }
+          int zigbeeFaultDuration = std::chrono::duration_cast<std::chrono::seconds>(currentSec - zigbeeModuleFaultSec_).count();
+          if (zigbeeFaultDuration > 600)
+          {
+            return true;
+          }
+          return false;
+        }
+
+        void setZigbeeFault(bool fault) override
+        {
+          std::shared_lock<std::shared_timed_mutex> lk(mutex_);
+          zigbeeModuleFault_ = fault;
+        }
+
+        bool isZigbeeModuleFault() override
         {
           std::shared_lock<std::shared_timed_mutex> lk(mutex_);
           return zigbeeModuleFault_;
@@ -2321,7 +2488,7 @@ namespace cti
           }
         }
 
-        void foreachElevatorDodgeStation(std::function<bool(std::shared_ptr<StationModel>)> handler) override
+        void foreachDodgeStation(std::function<bool(std::shared_ptr<StationModel>)> handler) override
         {
           if (!handler)
           {
@@ -2329,7 +2496,7 @@ namespace cti
           }
 
           std::shared_lock<std::shared_timed_mutex> lk(mutex_);
-          for (auto& station : elevatorDodgeStations_)
+          for (auto& station : dodgeStations_)
           {
             if (handler(station.second))
             {
